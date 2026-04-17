@@ -37,8 +37,27 @@ export default function AdminPage() {
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error', message: string } | null>(null);
 
   useEffect(() => {
+    checkAdminAccess();
     fetchUsers();
   }, []);
+
+  const checkAdminAccess = async () => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.user) {
+      window.location.href = '/';
+      return;
+    }
+
+    const { data: profile } = await supabase
+      .from('profiles')
+      .select('role')
+      .eq('email', session.user.email)
+      .single();
+
+    if (profile && profile.role !== 'ADMIN') {
+      window.location.href = '/'; // Kick out non-admins
+    }
+  };
 
   const fetchUsers = async () => {
     setLoading(true);

@@ -21,37 +21,53 @@ export default function ModuleLayout({ children, title, subtitle }: ModuleLayout
 
   useEffect(() => {
     setMounted(true);
+    let isMounted = true;
+
     const checkAuth = async () => {
-      // Pequeno atraso para garantir que o estado de autenticação tenha chance de ser restaurado
-      // especialmente em ambientes de iframe onde a persistência pode demorar um pouco
-      const { data: { session } } = await supabase.auth.getSession();
-      
-      if (!session) {
-        // Tenta mais uma vez após um breve delay se vier nulo de primeira
-        await new Promise(resolve => setTimeout(resolve, 500));
-        const { data: { session: retrySession } } = await supabase.auth.getSession();
+      try {
+        const { data: { session }, error } = await supabase.auth.getSession();
         
-        if (!retrySession) {
-          router.push('/');
-        } else {
-          setUser(retrySession.user);
+        if (error) {
+          console.error("Auth check error:", error);
         }
-      } else {
-        setUser(session.user);
+
+        if (!session) {
+          // Aguarda um pequeno delay para a recuperação de sessão local do Supabase
+          await new Promise(resolve => setTimeout(resolve, 800));
+          const { data: { session: retrySession } } = await supabase.auth.getSession();
+          
+          if (!retrySession && isMounted) {
+            router.push('/');
+          } else if (retrySession && isMounted) {
+            setUser(retrySession.user);
+            setLoading(false);
+          }
+        } else if (isMounted) {
+          setUser(session.user);
+          setLoading(false);
+        }
+      } catch (err) {
+        console.error("Erro fatal ao carregar sessão:", err);
+        if (isMounted) router.push('/');
       }
-      setLoading(false);
     };
+
     checkAuth();
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (!session) {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      // Evita o redirecionamento indevido no INITIAL_SESSION e foca apenas no logout intencional
+      if (event === 'SIGNED_OUT' && isMounted) {
         router.push('/');
-      } else {
+      } else if (session && isMounted) {
         setUser(session.user);
+        setLoading(false);
       }
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      isMounted = false;
+      subscription.unsubscribe();
+    };
   }, [router]);
 
   // Evita erros de hidratação garantindo que o conteúdo inicial corresponda ao servidor

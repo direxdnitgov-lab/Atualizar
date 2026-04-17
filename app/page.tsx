@@ -223,19 +223,8 @@ export default function PortalPage() {
   };
 
   const handleAccessApp = async (app: AppConfig) => {
-    // Revalida a sessão antes de navegar para garantir que o token ainda é válido
-    const { data: { session } } = await supabase.auth.getSession();
-    
-    if (session?.user) {
-      setUser(session.user);
-      await logActivity(session.user.id, 'APP_ACCESS', { app_name: app.name, app_id: app.id });
-      // Redireciona para a URL do sistema
-      router.push(app.url);
-    } else {
-      // Se a sessão expirou, força o logout e limpa o estado
-      setUser(null);
-      setLoginError('Sessão expirada. Por favor, entre novamente.');
-    }
+    // Redireciona imediatamente sem checar, deixando a página de destino validar o auth
+    router.push(app.url);
   };
 
   const filteredApps = APPS.filter(app => {

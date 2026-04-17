@@ -44,8 +44,7 @@ export default function AdminPage() {
   const checkAdminAccess = async () => {
     const { data: { session } } = await supabase.auth.getSession();
     if (!session?.user) {
-      window.location.href = '/';
-      return;
+      return; // Will be handled by the layout now
     }
 
     const { data: profile } = await supabase
@@ -55,7 +54,7 @@ export default function AdminPage() {
       .single();
 
     if (profile && profile.role !== 'ADMIN') {
-      window.location.href = '/'; // Kick out non-admins
+      window.location.href = '/'; // kick non-admin out back to home
     }
   };
 

@@ -4,7 +4,7 @@ import React, { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useRouter } from 'next/navigation';
 import { motion } from 'motion/react';
-import { Shield, LogOut, ArrowLeft } from 'lucide-react';
+import { Shield, LogOut, ArrowLeft, AlertTriangle } from 'lucide-react';
 import Link from 'next/link';
 
 interface ModuleLayoutProps {
@@ -23,43 +23,27 @@ export default function ModuleLayout({ children, title, subtitle }: ModuleLayout
     setMounted(true);
     let isMounted = true;
 
-    const checkAuth = async () => {
-      try {
-        const { data: { session }, error } = await supabase.auth.getSession();
-        
-        if (error) {
-          console.error("Auth check error:", error);
-        }
-
-        if (!session) {
-          // Aguarda um pequeno delay para a recuperação de sessão local do Supabase
-          await new Promise(resolve => setTimeout(resolve, 800));
-          const { data: { session: retrySession } } = await supabase.auth.getSession();
-          
-          if (!retrySession && isMounted) {
-            router.push('/');
-          } else if (retrySession && isMounted) {
-            setUser(retrySession.user);
-            setLoading(false);
-          }
-        } else if (isMounted) {
-          setUser(session.user);
-          setLoading(false);
-        }
-      } catch (err) {
-        console.error("Erro fatal ao carregar sessão:", err);
-        if (isMounted) router.push('/');
+    // Busca a sessão inicial com segurança e não faz redirecionamento forçado no código síncrono.
+    supabase.auth.getSession().then(({ data: { session }, error }) => {
+      if (error) {
+        console.error("Erro ao buscar sessão:", error);
       }
-    };
+      if (isMounted) {
+        if (session?.user) {
+          setUser(session.user);
+        }
+        setLoading(false);
+      }
+    });
 
-    checkAuth();
-
+    // Escuta as mudanças de estado
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      // Evita o redirecionamento indevido no INITIAL_SESSION e foca apenas no logout intencional
-      if (event === 'SIGNED_OUT' && isMounted) {
-        router.push('/');
-      } else if (session && isMounted) {
-        setUser(session.user);
+      if (isMounted) {
+        if (session?.user) {
+          setUser(session.user);
+        } else if (event === 'SIGNED_OUT') {
+          setUser(null);
+        }
         setLoading(false);
       }
     });
@@ -68,7 +52,7 @@ export default function ModuleLayout({ children, title, subtitle }: ModuleLayout
       isMounted = false;
       subscription.unsubscribe();
     };
-  }, [router]);
+  }, []);
 
   // Evita erros de hidratação garantindo que o conteúdo inicial corresponda ao servidor
   if (!mounted || loading) {
@@ -79,7 +63,29 @@ export default function ModuleLayout({ children, title, subtitle }: ModuleLayout
     );
   }
 
-  if (!user) return null;
+  // Fallback visual muito mais seguro (sem redirecionamentos loopados)
+  if (!user) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-[#0f172a] p-6">
+        <div className="bg-white p-10 rounded-[32px] max-w-md w-full text-center shadow-2xl flex flex-col items-center">
+          <div className="w-20 h-20 bg-rose-50 text-rose-500 rounded-full flex items-center justify-center mb-6">
+            <AlertTriangle className="w-10 h-10" />
+          </div>
+          <h2 className="text-2xl font-black text-slate-900 tracking-tight uppercase mb-2">Acesso Negado</h2>
+          <p className="text-slate-500 font-medium mb-8">
+            Sua sessão não foi confirmada pelo servidor ou você foi desconectado.
+          </p>
+          <Link 
+            href="/"
+            className="w-full py-4 bg-[#1d4ed8] text-white rounded-2xl font-bold uppercase tracking-widest text-xs hover:bg-blue-700 transition-all flex items-center justify-center gap-2"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            Voltar ao Menu Principal
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#f8fafc] flex flex-col font-sans text-slate-900">

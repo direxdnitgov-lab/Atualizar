@@ -33,6 +33,7 @@ interface AppConfig {
   color: string;
   url: string;
   adminOnly?: boolean;
+  implemented?: boolean;
 }
 
 interface Profile {
@@ -42,6 +43,7 @@ interface Profile {
   role: string;
   status: string;
   avatar_color: string;
+  allowed_apps?: string[];
 }
 
 interface ActivityLog {
@@ -59,7 +61,8 @@ const APPS: AppConfig[] = [
     description: 'Controle total de vigência, aditivos e documentação.',
     icon: Users,
     color: 'bg-[#1d4ed8]',
-    url: '/apps/contratos'
+    url: '/apps/contratos',
+    implemented: true
   },
   {
     id: 'erp',
@@ -67,7 +70,8 @@ const APPS: AppConfig[] = [
     description: 'Acompanhamento financeiro e liberação de recursos.',
     icon: BarChart3,
     color: 'bg-[#1e3a8a]',
-    url: '/apps/financeiro'
+    url: '/apps/financeiro',
+    implemented: true
   },
   {
     id: 'store',
@@ -75,7 +79,8 @@ const APPS: AppConfig[] = [
     description: 'Gestão de estoque e solicitações de materiais.',
     icon: ShoppingBag,
     color: 'bg-[#3b82f6]',
-    url: '/apps/estoque'
+    url: '/apps/estoque',
+    implemented: false
   },
   {
     id: 'chat',
@@ -83,7 +88,8 @@ const APPS: AppConfig[] = [
     description: 'Chat seguro para alinhamento entre departamentos.',
     icon: MessageSquare,
     color: 'bg-[#2563eb]',
-    url: '/apps/chat'
+    url: '/apps/chat',
+    implemented: true
   },
   {
     id: 'email',
@@ -91,7 +97,8 @@ const APPS: AppConfig[] = [
     description: 'Alertas automáticos de prazos e vencimentos.',
     icon: Mail,
     color: 'bg-[#1e40af]',
-    url: '/apps/notificacoes'
+    url: '/apps/notificacoes',
+    implemented: false
   },
   {
     id: 'calendar',
@@ -99,7 +106,8 @@ const APPS: AppConfig[] = [
     description: 'Calendário de vistorias e entregas técnicas.',
     icon: Calendar,
     color: 'bg-[#1d4ed8]',
-    url: '/apps/agenda'
+    url: '/apps/agenda',
+    implemented: false
   },
   {
     id: 'admin',
@@ -108,7 +116,8 @@ const APPS: AppConfig[] = [
     icon: Settings,
     color: 'bg-[#0f172a]',
     url: '/apps/admin',
-    adminOnly: true
+    adminOnly: true,
+    implemented: true
   }
 ];
 
@@ -130,6 +139,7 @@ export default function PortalPage() {
   const [activities, setActivities] = useState<ActivityLog[]>([]);
   const [showLogs, setShowLogs] = useState(false);
   const [appStatuses, setAppStatuses] = useState<Record<string, 'online' | 'offline' | 'checking'>>({});
+  const [dbHealth, setDbHealth] = useState<'checking' | 'online' | 'offline'>('checking');
   const [loginError, setLoginError] = useState<string | null>(null);
 
   const router = useRouter();
@@ -155,17 +165,45 @@ export default function PortalPage() {
     APPS.forEach(app => initialStatuses[app.id] = 'checking');
     setAppStatuses(initialStatuses);
 
-    // Simulate real connectivity check with delay for each app
+    // Map each app to its core Supabase table
+    const appTables: Record<string, string> = {
+      'admin': 'profiles',
+      'chat': 'messages',
+      'store': 'almoxarifado_items',
+      'crm': 'contratos',
+      'erp': 'financeiro_medicoes',
+      'email': 'notificacoes_alertas',
+      'calendar': 'cronogramas'
+    };
+
     APPS.forEach(async (app, index) => {
-      // Small random delay to feel like a real network check
-      await new Promise(resolve => setTimeout(resolve, 800 + (index * 400)));
+      // Pequeno delay para efeito visual agradável
+      await new Promise(resolve => setTimeout(resolve, 300 + (index * 200)));
       
-      // For demo purposes, systems are online if they are in the list.
-      // In a real scenario, we could fetch(app.url)
-      setAppStatuses(prev => ({
-        ...prev,
-        [app.id]: 'online'
-      }));
+      // Regra de Ouro: Se a gente não terminou de programar a rota, não importa se no Supabase existe a tabela. Tem que ficar "Em Desenvolvimento" (offline).
+      if (!app.implemented) {
+        setAppStatuses(prev => ({ ...prev, [app.id]: 'offline' }));
+        return;
+      }
+
+      const targetTable = appTables[app.id];
+      if (!targetTable) {
+         setAppStatuses(prev => ({ ...prev, [app.id]: 'offline' }));
+         return;
+      }
+
+      try {
+        const { error } = await supabase.from(targetTable).select('id').limit(1);
+        if (error && error.code === '42P01') {
+          // 42P01: Table undefined / relation does not exist
+          setAppStatuses(prev => ({ ...prev, [app.id]: 'offline' }));
+        } else {
+          // Table exists! E está implementado localmente!
+          setAppStatuses(prev => ({ ...prev, [app.id]: 'online' }));
+        }
+      } catch (err) {
+        setAppStatuses(prev => ({ ...prev, [app.id]: 'offline' }));
+      }
     });
   };
 
@@ -174,6 +212,25 @@ export default function PortalPage() {
       const { data: { session } } = await supabase.auth.getSession();
       setUser(session?.user ?? null);
       
+      // Ping Supabase to verify DB connection
+      try {
+        const { error } = await supabase.from('profiles').select('id').limit(1);
+        if (error && error.code !== 'PGRST116') {
+          // If the table doesn't exist or RLS completely blocks reading structure, we might throw
+          // But usually code '42P01' means table undefined => offline or not configured
+          if (error.code === '42P01') {
+            setDbHealth('offline');
+          } else {
+             // Real query issue
+            setDbHealth('online'); 
+          }
+        } else {
+          setDbHealth('online');
+        }
+      } catch {
+        setDbHealth('offline');
+      }
+
       // Try fetching profiles from Supabase if table exists
       try {
         const { data: dbProfiles } = await supabase.from('profiles').select('*');
@@ -237,6 +294,14 @@ export default function PortalPage() {
     const isUserAdmin = currentProfile?.role === 'ADMIN';
     
     if (app.adminOnly && !isUserAdmin) return false;
+
+    // Lógica para bloquear apps baseado no array de selected allowed_apps do banco.
+    // Se a coluna existir e tiver apps marcados, usamos ela como fonte da verdade:
+    if (currentProfile?.allowed_apps && currentProfile.allowed_apps.length > 0) {
+      if (!currentProfile.allowed_apps.includes(app.id) && app.id !== 'admin') {
+        return false;
+      }
+    }
     
     return matchesSearch;
   });
@@ -416,7 +481,19 @@ export default function PortalPage() {
             <div className="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center text-white backdrop-blur-sm border border-white/20">
               <Shield className="w-6 h-6" />
             </div>
-            <h1 className="font-black text-2xl tracking-tighter text-white uppercase italic">DIREX</h1>
+            <div className="flex flex-col">
+               <h1 className="font-black text-xl md:text-2xl tracking-tighter text-white uppercase italic leading-none hidden md:block">DIREX</h1>
+               
+               <div className="flex items-center gap-1.5 mt-1">
+                 <div className={`w-2 h-2 rounded-full ${
+                  dbHealth === 'online' ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]' : 
+                  dbHealth === 'offline' ? 'bg-rose-400' : 'bg-amber-400 animate-pulse'
+                 }`} />
+                 <span className="text-[9px] font-bold text-blue-100 uppercase tracking-widest leading-none">
+                  {dbHealth === 'online' ? 'Banco Supabase Online' : dbHealth === 'offline' ? 'Banco Offline/Não Configurado' : 'Checando Rede...'}
+                 </span>
+               </div>
+            </div>
           </div>
 
           <div className="flex items-center gap-6">
@@ -487,37 +564,46 @@ export default function PortalPage() {
                   onClick={() => handleAccessApp(app)}
                   className="group cursor-pointer"
                 >
-                  <div className="bg-white p-10 rounded-[40px] border border-slate-100 shadow-xl hover:border-[#1d4ed8] hover:shadow-blue-200/50 transition-all flex flex-col h-[300px] relative overflow-hidden">
+                  <div 
+                    onClick={() => {
+                        if(appStatuses[app.id] === 'online') handleAccessApp(app);
+                    }}
+                    className={`bg-white p-10 rounded-[40px] border border-slate-100 shadow-xl transition-all flex flex-col h-[300px] relative overflow-hidden ${
+                      appStatuses[app.id] === 'online' ? 'hover:border-[#1d4ed8] hover:shadow-blue-200/50 cursor-pointer group' : 'opacity-60 cursor-not-allowed grayscale-[0.2]'
+                    }`}
+                  >
                     {/* Background Decorative Element */}
                     <div className="absolute -right-4 -top-4 w-24 h-24 bg-slate-50 rounded-full group-hover:bg-blue-50 transition-colors" />
                     
-                    <div className={`w-14 h-14 ${app.color} rounded-[24px] flex items-center justify-center text-white mb-6 shadow-lg shadow-current/30 group-hover:scale-110 transition-transform relative z-10`}>
+                    <div className={`w-14 h-14 ${app.color} rounded-[24px] flex items-center justify-center text-white mb-6 shadow-lg shadow-current/30 group-hover:scale-110 transition-transform relative z-10 ${appStatuses[app.id] !== 'online' && 'bg-slate-300 shadow-none'}`}>
                       <app.icon className="w-8 h-8" />
                     </div>
                     
                     <h3 className="text-xl font-black text-slate-900 mb-2 truncate uppercase tracking-tight relative z-10">{app.name}</h3>
                     <p className="text-slate-500 text-sm leading-relaxed line-clamp-2 mb-4 font-medium relative z-10">{app.description}</p>
                     
-                    <div className="mt-auto flex items-center gap-3 text-[12px] font-black text-[#1d4ed8] uppercase tracking-[2px] group-hover:gap-4 transition-all relative z-10">
-                      Entrar no Sistema
-                      <ArrowRight className="w-5 h-5" />
+                    <div className={`mt-auto flex items-center gap-3 text-[12px] font-black uppercase tracking-[2px] transition-all relative z-10 ${
+                       appStatuses[app.id] === 'online' ? 'text-[#1d4ed8] group-hover:gap-4' : 'text-slate-400'
+                    }`}>
+                      {appStatuses[app.id] === 'online' ? 'Entrar no Sistema' : 'Em Desenvolvimento'}
+                      {appStatuses[app.id] === 'online' && <ArrowRight className="w-5 h-5" />}
                     </div>
 
                     <div className="absolute top-10 right-10 flex items-center gap-1.5 opacity-100 transition-opacity">
                       {appStatuses[app.id] === 'checking' ? (
                         <>
-                          <div className="w-2 h-2 rounded-full bg-slate-200 animate-pulse" />
-                          <span className="text-[10px] font-black text-slate-400 uppercase">Conectando...</span>
+                          <div className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                          <span className="text-[10px] font-black text-amber-500 uppercase tracking-widest">Checando</span>
                         </>
                       ) : appStatuses[app.id] === 'online' ? (
                         <>
                           <div className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
-                          <span className="text-[10px] font-black text-emerald-600 uppercase">Online</span>
+                          <span className="text-[10px] font-black text-emerald-600 uppercase tracking-widest">Online</span>
                         </>
                       ) : (
                         <>
-                          <div className="w-2 h-2 rounded-full bg-rose-500" />
-                          <span className="text-[10px] font-black text-rose-600 uppercase">Offline</span>
+                          <div className="w-2 h-2 rounded-full bg-slate-300" />
+                          <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Aguardando</span>
                         </>
                       )}
                     </div>

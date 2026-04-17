@@ -26,14 +26,26 @@ interface UserProfile {
   role: string;
   status: string;
   created_at?: string;
+  allowed_apps?: string[];
 }
+
+const AVAILABLE_MODULES = [
+  { id: 'crm', name: 'Gestão de Contratos' },
+  { id: 'erp', name: 'Medição & Empenho' },
+  { id: 'store', name: 'Almoxarifado' },
+  { id: 'chat', name: 'Comunicação Interna' },
+  { id: 'email', name: 'Notificações' },
+  { id: 'calendar', name: 'Cronograma de Medição' }
+];
 
 export default function AdminPage() {
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
-  const [newUser, setNewUser] = useState({ email: '', full_name: '', role: 'USER' });
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
+  const [newUser, setNewUser] = useState({ email: '', full_name: '', role: 'USER', allowed_apps: [] as string[] });
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error', message: string } | null>(null);
 
   useEffect(() => {
@@ -87,34 +99,54 @@ export default function AdminPage() {
 
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    // Mostramos a instrução correta para criação segura de conta
+    setFeedback({ 
+      type: 'success', 
+      message: 'Por questões de segurança estrutural de Chave Estrangeira, novos usuários devem ser adicionados na aba "Authentication -> Add user" do painel Supabase. Após criar o e-mail/senha lá, o perfil aparecerá nesta tabela automaticamente para você editar as permissões.' 
+    });
+    
+    // Fechamos o modal após instruir
+    setTimeout(() => {
+      setShowAddModal(false);
+      setNewUser({ email: '', full_name: '', role: 'USER', allowed_apps: [] });
+    }, 8000);
+  };
+
+  const handleUpdateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingUser) return;
     setFeedback(null);
 
-    // Nota: No Supabase Client padrão, signUp cria um usuário mas o faz logar.
-    // Para criar usuários como Admin, o ideal é usar o Dashboard do Supabase ou Edge Functions.
-    // Aqui simularemos a inserção na tabela de perfis e daremos a instrução ao usuário.
-    
+    // Na tabela "profiles", atualiza quais aplicativos a pessoa tem acesso e níveis
     try {
       const { error } = await supabase
         .from('profiles')
-        .insert([{
-          email: newUser.email,
-          full_name: newUser.full_name,
-          role: newUser.role,
-          status: 'Prata',
-          id: Math.random().toString(36).substring(2) // Apenas para mock/perfil
-        }]);
+        .update({
+          full_name: editingUser.full_name,
+          role: editingUser.role,
+          allowed_apps: editingUser.allowed_apps
+        })
+        .eq('id', editingUser.id);
 
       if (error) throw error;
 
-      setFeedback({ 
-        type: 'success', 
-        message: 'Perfil criado com sucesso! Lembre-se de criar a conta de autenticação no Dashboard do Supabase.' 
-      });
-      setShowAddModal(false);
-      setNewUser({ email: '', full_name: '', role: 'USER' });
+      setFeedback({ type: 'success', message: 'Permissões atualizadas com sucesso!' });
+      setShowEditModal(false);
+      setEditingUser(null);
       fetchUsers();
     } catch (err: any) {
-      setFeedback({ type: 'error', message: err.message || 'Erro ao criar perfil.' });
+      console.error(err);
+      
+      // If column does not exist because user hasn't run the script
+      if (err.message && err.message.includes('column "allowed_apps"')) {
+         setFeedback({ 
+            type: 'error', 
+            message: 'Erro crítico: A coluna "allowed_apps" não existe no Supabase. Por favor, execute o código SQL pendente no Editor.' 
+         });
+      } else {
+         setFeedback({ type: 'error', message: 'Erro ao atualizar permissões do usuário.' });
+      }
     }
   };
 
@@ -248,7 +280,13 @@ export default function AdminPage() {
                       </td>
                       <td className="px-8 py-6">
                         <div className="flex items-center justify-end gap-2">
-                          <button className="w-8 h-8 flex items-center justify-center text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all">
+                          <button 
+                            onClick={() => {
+                              setEditingUser({ ...user, allowed_apps: user.allowed_apps || [] });
+                              setShowEditModal(true);
+                            }}
+                            className="w-8 h-8 flex items-center justify-center text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
+                          >
                             <Edit3 className="w-4 h-4" />
                           </button>
                           <button className="w-8 h-8 flex items-center justify-center text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all">
@@ -329,59 +367,160 @@ export default function AdminPage() {
                 </button>
               </div>
 
-              <form onSubmit={handleCreateUser} className="p-10 space-y-6">
+              <div className="p-10 text-center space-y-6">
+                
+                {feedback && (
+                  <div className={`p-4 rounded-2xl text-xs font-bold leading-relaxed mb-6 ${
+                    feedback.type === 'error' ? 'bg-rose-50 text-rose-600' : 'bg-emerald-50 text-emerald-600'
+                  }`}>
+                    {feedback.message}
+                  </div>
+                )}
+
+                <div className="w-20 h-20 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center mx-auto mb-6">
+                  <ShieldCheck className="w-10 h-10" />
+                </div>
+                
+                <h4 className="text-lg font-black text-slate-800 uppercase italic">Criação de Contas</h4>
+                
+                <p className="text-slate-500 font-medium text-sm leading-relaxed">
+                  Por razões de segurança, toda nova conta corporativa deve ser criada diretamente no painel de Autenticação do Supabase. 
+                  Ao criar uma conta lá (e-mail e senha), o perfil aparecerá nesta tabela automaticamente para você editar as permissões.
+                </p>
+
+                <div className="pt-6 flex flex-col gap-3">
+                  <a 
+                    href={supabaseDashboardUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="w-full py-4 bg-blue-600 text-white rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-blue-700 transition-all flex items-center justify-center shadow-lg shadow-blue-200"
+                  >
+                    Ir para o Supabase Auth
+                  </a>
+                  <button 
+                    onClick={() => setShowAddModal(false)}
+                    className="w-full py-4 bg-slate-50 text-slate-500 rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-slate-100 transition-all"
+                  >
+                    Fechar
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Edit User Modal */}
+      <AnimatePresence>
+        {showEditModal && editingUser && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-slate-900/60 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="bg-white w-full max-w-lg rounded-[40px] shadow-2xl overflow-hidden max-h-[90vh] flex flex-col"
+            >
+              <div className="p-10 border-b border-slate-50 flex items-center justify-between bg-slate-50/50 shrink-0">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 bg-amber-500 rounded-2xl flex items-center justify-center text-white shadow-lg shadow-amber-200">
+                    <Edit3 className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-black text-slate-900 uppercase tracking-tighter italic">Editar Permissões</h3>
+                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">{editingUser.email}</p>
+                  </div>
+                </div>
+                <button 
+                  onClick={() => setShowEditModal(false)}
+                  className="w-10 h-10 flex items-center justify-center bg-white border border-slate-100 rounded-xl text-slate-400 hover:text-rose-500 transition-all"
+                >
+                  <XCircle className="w-5 h-5" />
+                </button>
+              </div>
+
+              <form onSubmit={handleUpdateUser} className="p-10 space-y-6 overflow-y-auto">
                 <div>
                   <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">Nome Completo</label>
                   <input 
                     required
                     type="text" 
-                    value={newUser.full_name}
-                    onChange={(e) => setNewUser({...newUser, full_name: e.target.value})}
-                    placeholder="Ex: João da Silva"
-                    className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-4 focus:ring-blue-100 outline-none transition-all placeholder:text-slate-300 font-bold"
+                    value={editingUser.full_name}
+                    onChange={(e) => setEditingUser({...editingUser, full_name: e.target.value})}
+                    className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-4 focus:ring-amber-100 outline-none transition-all placeholder:text-slate-300 font-bold"
                   />
                 </div>
-                <div>
-                  <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">E-mail Corporativo</label>
-                  <input 
-                    required
-                    type="email" 
-                    value={newUser.email}
-                    onChange={(e) => setNewUser({...newUser, email: e.target.value})}
-                    placeholder="joao@direx.gov.br"
-                    className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-4 focus:ring-blue-100 outline-none transition-all placeholder:text-slate-300 font-bold"
-                  />
-                </div>
+                
                 <div>
                   <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 px-1">Nível de Acesso</label>
                   <select 
-                    value={newUser.role}
-                    onChange={(e) => setNewUser({...newUser, role: e.target.value})}
-                    className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-4 focus:ring-blue-100 outline-none transition-all font-bold appearance-none"
+                    value={editingUser.role}
+                    onChange={(e) => setEditingUser({...editingUser, role: e.target.value})}
+                    className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-2xl focus:ring-4 focus:ring-amber-100 outline-none transition-all font-bold appearance-none"
                   >
                     <option value="USER">USUÁRIO PADRÃO</option>
                     <option value="ADMIN">ADMINISTRADOR</option>
                   </select>
                 </div>
 
-                <div className="pt-4 flex gap-3">
+                <div className="space-y-3">
+                  <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest px-1">Módulos Liberados</label>
+                  <div className="grid grid-cols-2 gap-3">
+                    {AVAILABLE_MODULES.map(module => (
+                      <label key={module.id} className="flex items-center gap-3 p-3 border border-slate-200 rounded-xl cursor-pointer hover:bg-slate-50 transition-all">
+                        <input 
+                          type="checkbox"
+                          checked={(editingUser.allowed_apps || []).includes(module.id)}
+                          onChange={(e) => {
+                            const currentApps = editingUser.allowed_apps || [];
+                            if (e.target.checked) {
+                              setEditingUser({ ...editingUser, allowed_apps: [...currentApps, module.id] });
+                            } else {
+                              setEditingUser({ ...editingUser, allowed_apps: currentApps.filter(id => id !== module.id) });
+                            }
+                          }}
+                          className="w-4 h-4 text-amber-500 rounded focus:ring-amber-500"
+                        />
+                        <span className="text-xs font-bold text-slate-700 leading-none">{module.name}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="pt-4 border-t border-slate-100 flex flex-col gap-2">
+                   <button
+                    type="button"
+                    onClick={async () => {
+                      if(window.confirm(`Deseja enviar um e-mail de redefinição de senha para ${editingUser.email}?`)){
+                        const { error } = await supabase.auth.resetPasswordForEmail(editingUser.email);
+                        if(error) {
+                          alert(`Erro ao solicitar redefinição: ${error.message}`);
+                        } else {
+                          alert(`E-mail de redefinição de senha enviado para ${editingUser.email} com sucesso!`);
+                        }
+                      }
+                    }}
+                    className="w-full py-4 bg-slate-100/50 hover:bg-slate-100 text-slate-600 font-bold uppercase tracking-widest text-[10px] rounded-2xl transition-all border border-slate-200 flex items-center justify-center gap-2"
+                   >
+                     Solicitar Redefinição de Senha por E-mail
+                   </button>
+                   <p className="text-[9px] text-center text-slate-400 uppercase font-bold px-2">Por segurança, senhas só podem ser alteradas direto no Painel Supabase ou validando o e-mail.</p>
+                </div>
+
+                <div className="pt-2 flex gap-3">
                   <button 
                     type="button"
-                    onClick={() => setShowAddModal(false)}
+                    onClick={() => setShowEditModal(false)}
                     className="flex-grow py-5 bg-slate-50 text-slate-400 font-black uppercase tracking-widest text-xs rounded-2xl hover:bg-slate-100 transition-all"
                   >
                     Cancelar
                   </button>
                   <button 
                     type="submit"
-                    className="flex-grow py-5 bg-blue-600 text-white font-black uppercase tracking-widest text-xs rounded-2xl shadow-xl shadow-blue-200 hover:bg-blue-700 transition-all"
+                    className="flex-grow py-5 bg-amber-500 text-white font-black uppercase tracking-widest text-xs rounded-2xl shadow-xl shadow-amber-200 hover:bg-amber-600 transition-all"
                   >
-                    Salvar Perfil
+                    Salvar Alterações
                   </button>
                 </div>
-                <p className="text-[10px] text-slate-400 text-center font-bold px-6 leading-relaxed">
-                  Ao salvar, o perfil será adicionado ao banco de dados. Você precisará ativar o acesso no painel do Supabase.
-                </p>
               </form>
             </motion.div>
           </div>

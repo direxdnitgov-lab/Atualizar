@@ -262,6 +262,16 @@ export default function PortalPage() {
   const handleLogin = async (e?: React.FormEvent | React.KeyboardEvent) => {
     if (e) e.preventDefault();
     setLoginError(null);
+    
+    // Força a limpeza de qualquer token "sujo" preso no navegador antes de logar
+    try {
+      Object.keys(localStorage).forEach(key => {
+        if (key.includes('supabase')) {
+          localStorage.removeItem(key);
+        }
+      });
+    } catch {}
+
     const { data, error } = await supabase.auth.signInWithPassword({
       email,
       password,
@@ -457,13 +467,8 @@ export default function PortalPage() {
               </button>
             </div>
 
-            <div className="mt-auto p-6 bg-blue-50/50 rounded-2xl border border-blue-100/50">
-              <h5 className="font-bold text-blue-900 text-sm mb-1 italic">Precisa de ajuda?</h5>
-              <p className="text-xs text-blue-700/60 mb-4">Entre em contato com o administrador do sistema.</p>
-              <button className="w-full py-3 bg-[#1d4ed8] text-white text-xs font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-blue-700 transition-all">
-                <MessageSquare className="w-4 h-4" />
-                Enviar Mensagem ao Admin
-              </button>
+            <div className="mt-auto p-6">
+              {/* Help section removed as requested by user */}
             </div>
           </div>
         </motion.div>

@@ -1,22 +1,35 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   DollarSign, FileText, CheckCircle, TrendingUp, 
-  Plus, Search, Filter, MoreHorizontal, Loader2, AlertCircle 
+  Plus, Search, Filter, MoreHorizontal, Loader2, AlertCircle,
+  Download, Upload, X
 } from 'lucide-react';
 import ModuleLayout from '@/components/ModuleLayout';
 import { supabase } from '@/lib/supabase';
+import * as XLSX from 'xlsx';
 
 type RegistroFinanceiro = {
   id: string;
+  user_id?: string;
   contrato: string;
   tipo: 'Empenho' | 'Medição';
   data: string;
   valor: number;
   status: 'Pendente' | 'Aprovado' | 'Pago';
   fornecedor: string;
+  
+  // Advanced Empenho Fields
+  valor_pi?: number;
+  valor_reajustamento?: number;
+  valor_contrato?: number;
+  valor_empenho_inicial?: number;
+  valor_empenho_ajustes?: number;
+  valor_empenhado?: number;
+  valor_empenho_consumido?: number;
+  valor_empenho_saldo?: number;
 };
 
 const formatMoney = (value: number | string) => {
@@ -46,10 +59,23 @@ export default function FinanceiroPage() {
   const [editingRecord, setEditingRecord] = useState<RegistroFinanceiro | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   
+  // Export/Import State
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportSheetName, setExportSheetName] = useState('Medicoes_Empenhos');
+  const [exportFileName, setExportFileName] = useState('Relatorio_Financeiro');
+  
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importWorkbook, setImportWorkbook] = useState<XLSX.WorkBook | null>(null);
+  const [importSheets, setImportSheets] = useState<string[]>([]);
+  const [selectedImportSheet, setSelectedImportSheet] = useState<string>('');
+  
   // Form State
   const [formData, setFormData] = useState<Partial<RegistroFinanceiro>>({});
+  const [isMounted, setIsMounted] = useState(false);
 
   useEffect(() => {
+    setIsMounted(true);
     fetchRegistros();
   }, []);
 
@@ -89,7 +115,7 @@ export default function FinanceiroPage() {
     return matchesSearch && matchesTipo;
   });
 
-  const totalEmpenhado = registros.filter(i => i.tipo === 'Empenho').reduce((acc, curr) => acc + (Number(curr.valor) || 0), 0);
+  const totalEmpenhado = registros.filter(i => i.tipo === 'Empenho').reduce((acc, curr) => acc + (Number(curr.valor_empenhado || curr.valor) || 0), 0);
   const totalMedido = registros.filter(i => i.tipo === 'Medição').reduce((acc, curr) => acc + (Number(curr.valor) || 0), 0);
   const saldoPagar = totalEmpenhado - totalMedido;
 
@@ -117,13 +143,16 @@ export default function FinanceiroPage() {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formData.contrato || !formData.fornecedor || !formData.valor) {
+    if (!formData.contrato || !formData.fornecedor || (formData.tipo === 'Medição' && formData.valor === undefined)) {
       alert("Preencha todos os campos obrigatórios");
       return;
     }
     
     setIsSaving(true);
-    const novoRegistro = formData as RegistroFinanceiro;
+    const novoRegistro = {
+      ...formData,
+      valor: formData.valor || 0
+    } as RegistroFinanceiro;
 
     try {
       if (editingRecord) {
@@ -166,6 +195,150 @@ export default function FinanceiroPage() {
         console.error('Erro ao excluir:', err);
         alert('Erro ao excluir: ' + err.message);
       }
+    }
+  };
+
+  const handleExportExcel = () => {
+    if (registros.length === 0) {
+      alert("Não há dados para exportar.");
+      return;
+    }
+    
+    // Format data for Excel respecting Empenho's advanced fields
+    const excelData = registros.map(item => {
+      if (item.tipo === 'Empenho') {
+        return {
+          "ID do Registro": item.id,
+          "Contrato": item.contrato,
+          "Tipo": item.tipo,
+          "Data": new Date(item.data).toLocaleDateString('pt-BR', { timeZone: 'UTC' }),
+          "Status": item.status,
+          "Fornecedor": item.fornecedor,
+          // Advanced empenho fields exactly as requested
+          "Valor PI do Contrato": item.valor_pi || 0,
+          "Valor Reajustamento do Contrato": item.valor_reajustamento || 0,
+          "Valor Contrato (PI+R)": item.valor_contrato || 0,
+          "Valor Empenho Inicial": item.valor_empenho_inicial || 0,
+          "Valor Empenho Ajustes": item.valor_empenho_ajustes || 0,
+          "Valor Empenhado": item.valor_empenhado || 0,
+          "Valor Empenho Consumido": item.valor_empenho_consumido || 0,
+          "Valor Empenho Saldo": item.valor_empenho_saldo || 0,
+          "Valor (Geral)": item.valor
+        };
+      } else {
+        return {
+          "ID do Registro": item.id,
+          "Contrato": item.contrato,
+          "Tipo": item.tipo,
+          "Data": new Date(item.data).toLocaleDateString('pt-BR', { timeZone: 'UTC' }),
+          "Status": item.status,
+          "Fornecedor": item.fornecedor,
+          "Valor (R$)": item.valor
+        };
+      }
+    });
+
+    const worksheet = XLSX.utils.json_to_sheet(excelData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, exportSheetName || 'Planilha1');
+    
+    XLSX.writeFile(workbook, `${exportFileName || 'export'}.xlsx`);
+    setShowExportModal(false);
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      const bstr = evt.target?.result;
+      const wb = XLSX.read(bstr, { type: 'binary' });
+      setImportWorkbook(wb);
+      setImportSheets(wb.SheetNames);
+      if (wb.SheetNames.length > 0) setSelectedImportSheet(wb.SheetNames[0]);
+      setShowImportModal(true);
+    };
+    reader.readAsBinaryString(file);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const [importProgress, setImportProgress] = useState(0);
+
+  const handleConfirmImport = async () => {
+    if (!importWorkbook || !selectedImportSheet) return;
+    setIsSaving(true);
+    setImportProgress(0);
+    try {
+      const ws = importWorkbook.Sheets[selectedImportSheet];
+      const data: any[] = XLSX.utils.sheet_to_json(ws);
+      const CHUNK_SIZE = 400;
+      let totalInserted: RegistroFinanceiro[] = [];
+
+      for (let i = 0; i < data.length; i += CHUNK_SIZE) {
+        const chunk = data.slice(i, i + CHUNK_SIZE);
+        // Helper to parse Brazilian number format
+        const parseBrNumber = (val: any) => {
+          if (typeof val === 'number') return val;
+          if (!val) return 0;
+          // Remove thousands dots, replace decimal comma with point
+          const cleanVal = val.toString().replace(/\./g, '').replace(',', '.');
+          const parsed = parseFloat(cleanVal);
+          return isNaN(parsed) ? 0 : parsed;
+        };
+
+        const newRecords: Partial<RegistroFinanceiro>[] = chunk.map((row: any) => {
+          if (!row) return {};
+          try {
+            const record = {
+              id: String(row['Contrato'] || `REG-${Date.now()}-${Math.floor(Math.random() * 1000)}`),
+              contrato: String(row['Contrato'] || 'Desconhecido'),
+              tipo: 'Empenho',
+              data: new Date().toISOString().split('T')[0],
+              valor: parseBrNumber(row['Valor Empenhado'] || 0),
+              status: 'Pendente',
+              fornecedor: String(row['Fornecedor'] || 'Desconhecido'),
+              
+              valor_pi: parseBrNumber(row['Valor PI do Contrato']),
+              valor_reajustamento: parseBrNumber(row['Valor Reajustamento do Contrato']),
+              valor_contrato: parseBrNumber(row['Valor Contrato (PI+R)']),
+              valor_empenho_inicial: parseBrNumber(row['Valor Empenho Inicial']),
+              valor_empenho_ajustes: parseBrNumber(row['Valor Empenho Ajustes']),
+              valor_empenhado: parseBrNumber(row['Valor Empenhado']),
+              valor_empenho_consumido: parseBrNumber(row['Valor Empenho Consumido']),
+              valor_empenho_saldo: parseBrNumber(row['Valor Empenho Saldo']),
+            };
+            return record;
+          } catch (e) {
+            console.error("Erro mapeando linha:", row, e);
+            return {};
+          }
+        }).filter(r => Object.keys(r).length > 0);
+
+        console.log("Tentando inserir chunk de tamanho:", newRecords.length);
+        console.log("Primeiro registro do chunk:", newRecords[0]);
+
+        const { data: inserted, error } = await supabase
+          .from('financeiro_registros')
+          .insert(newRecords)
+          .select();
+
+        if (error) throw error;
+        totalInserted = [...totalInserted, ...(inserted || [])];
+        setImportProgress(Math.min(100, Math.floor(((i + chunk.length) / data.length) * 100)));
+      }
+      
+      setRegistros(prev => [...totalInserted, ...prev]);
+      alert(`${totalInserted.length} registros importados com sucesso!`);
+    } catch (err: any) {
+      console.error("Erro detalhado:", err);
+      const errorMessage = err?.message || err?.error?.message || JSON.stringify(err) || 'Erro desconhecido na importação';
+      alert('Erro ao importar: ' + errorMessage);
+    } finally {
+      setIsSaving(false);
+      setShowImportModal(false);
+      setImportWorkbook(null);
+      setImportProgress(0);
     }
   };
 
@@ -294,12 +467,34 @@ export default function FinanceiroPage() {
               </div>
             </div>
           </div>
-          <button 
-            onClick={() => handleOpenModal()}
-            className="w-full md:w-auto px-6 py-3 bg-[#1d4ed8] hover:bg-blue-700 text-white font-bold text-sm rounded-xl transition-colors shadow-lg shadow-blue-200 flex items-center justify-center gap-2 uppercase tracking-wide">
-            <Plus className="w-4 h-4" />
-            Novo Registro
-          </button>
+          <div className="flex items-center gap-2 w-full md:w-auto overflow-x-auto">
+            <input 
+              type="file" 
+              accept=".xlsx, .xls, .csv" 
+              className="hidden" 
+              ref={fileInputRef} 
+              onChange={handleFileUpload} 
+            />
+            <button 
+              onClick={() => fileInputRef.current?.click()}
+              className="px-4 py-3 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 font-bold text-xs rounded-xl transition-colors flex items-center justify-center gap-2 uppercase tracking-wide whitespace-nowrap">
+              <Upload className="w-4 h-4" />
+              Importar
+            </button>
+            <button 
+              onClick={() => setShowExportModal(true)}
+              className="px-4 py-3 bg-white border border-slate-200 hover:bg-slate-50 text-slate-600 font-bold text-xs rounded-xl transition-colors flex items-center justify-center gap-2 uppercase tracking-wide whitespace-nowrap">
+              <Download className="w-4 h-4" />
+              Exportar
+            </button>
+            <div className="w-px h-8 bg-slate-200 mx-1 hidden md:block" />
+            <button 
+              onClick={() => handleOpenModal()}
+              className="px-6 py-3 bg-[#1d4ed8] hover:bg-blue-700 text-white font-bold text-xs md:text-sm rounded-xl transition-colors shadow-lg shadow-blue-200 flex items-center justify-center gap-2 uppercase tracking-wide whitespace-nowrap">
+              <Plus className="w-4 h-4" />
+              Novo Registro
+            </button>
+          </div>
         </div>
 
         {/* Data Table */}
@@ -330,36 +525,31 @@ export default function FinanceiroPage() {
                       className="hover:bg-slate-50/50 transition-colors group cursor-pointer"
                     >
                       <td className="px-6 py-5">
-                        <span className="text-sm font-bold text-slate-800 bg-white border border-slate-200 px-2.5 py-1 rounded-md shadow-sm">{item.id}</span>
+                        <span className="text-sm font-bold text-slate-800 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl shadow-sm">{item.id}</span>
                       </td>
                       <td className="px-6 py-5">
-                        <span className={`inline-flex items-center px-2.5 py-1 rounded-md text-[10px] font-black uppercase tracking-wider ${
-                          item.tipo === 'Empenho' ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700'
+                        <span className={`inline-flex items-center px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider ${
+                          item.tipo === 'Empenho' ? 'bg-blue-50 text-blue-700' : 'bg-purple-50 text-purple-700'
                         }`}>
                           {item.tipo}
                         </span>
                       </td>
                       <td className="px-6 py-5">
                         <p className="text-sm font-bold text-[#1d4ed8]">{item.contrato}</p>
-                        <p className="text-xs font-medium text-slate-500 mt-0.5">{item.fornecedor}</p>
+                        <p className="text-xs font-bold text-slate-400 mt-0.5">{item.fornecedor}</p>
                       </td>
                       <td className="px-6 py-5">
-                        <span className="text-sm font-medium text-slate-500">{formatDate(item.data)}</span>
+                        <span className="text-sm font-bold text-slate-400">{formatDate(item.data)}</span>
                       </td>
-                      <td className="px-6 py-5 text-right">
-                        <span className="text-sm font-black text-slate-800">{formatMoney(item.valor)}</span>
+                      <td className="px-6 py-5">
+                        <div className="flex flex-col">
+                          <span className="text-sm font-black text-slate-800">{formatMoney(item.valor)}</span>
+                          <span className="text-[10px] text-emerald-600 font-bold uppercase tracking-widest">{formatMoney(item.valor_empenhado || 0)}</span>
+                        </div>
                       </td>
-                      <td className="px-6 py-5 text-center">
-                         <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[10px] font-black uppercase tracking-wider ${
-                          item.status === 'Pago' ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200/50' :
-                          item.status === 'Aprovado' ? 'bg-blue-50 text-blue-600 ring-1 ring-blue-200/50' :
-                          'bg-amber-50 text-amber-600 ring-1 ring-amber-200/50'
-                        }`}>
-                          <div className={`w-1.5 h-1.5 rounded-full ${
-                            item.status === 'Pago' ? 'bg-emerald-500' :
-                            item.status === 'Aprovado' ? 'bg-blue-500' :
-                            'bg-amber-500'
-                          }`} />
+                      <td className="px-6 py-5">
+                         <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-wider bg-amber-50 text-amber-600 ring-1 ring-amber-200/50`}>
+                          <div className="w-1.5 h-1.5 rounded-full bg-amber-500" />
                           {item.status}
                         </span>
                       </td>
@@ -415,7 +605,7 @@ export default function FinanceiroPage() {
                   <p className="text-xs text-slate-500 font-bold uppercase tracking-widest mt-1">Gestão Financeira</p>
                 </div>
                 <button onClick={handleCloseModal} className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-200 transition-colors text-slate-500 font-bold">
-                  ✕
+                  <X className="w-4 h-4" />
                 </button>
               </div>
 
@@ -493,19 +683,67 @@ export default function FinanceiroPage() {
                     </div>
                   </div>
 
-                  <div>
-                    <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Valor (R$)</label>
-                    <input 
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      placeholder="0.00"
-                      value={formData.valor || ''} 
-                      onChange={(e) => setFormData({...formData, valor: parseFloat(e.target.value) || 0})}
-                      required
-                      className="w-full px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm font-bold text-slate-800 focus:ring-2 focus:ring-[#1d4ed8] focus:border-[#1d4ed8] outline-none transition-all"
-                    />
-                  </div>
+                  {formData.tipo === 'Empenho' ? (
+                    <div className="grid grid-cols-2 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-100">
+                      <div className="col-span-2">
+                        <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5 flex items-center gap-1">
+                          <AlertCircle className="w-3 h-3" />
+                          Métricas do Empenho
+                        </label>
+                      </div>
+                      
+                      <div>
+                        <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">PI do Contrato</label>
+                        <input type="number" step="0.01" value={formData.valor_pi || ''} onChange={(e) => setFormData({...formData, valor_pi: parseFloat(e.target.value) || 0})} className="w-full px-4 py-2 border rounded-xl text-sm" />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Reajustamento</label>
+                        <input type="number" step="0.01" value={formData.valor_reajustamento || ''} onChange={(e) => setFormData({...formData, valor_reajustamento: parseFloat(e.target.value) || 0})} className="w-full px-4 py-2 border rounded-xl text-sm" />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Contrato (PI+R)</label>
+                        <input type="number" step="0.01" value={formData.valor_contrato || ''} onChange={(e) => setFormData({...formData, valor_contrato: parseFloat(e.target.value) || 0})} className="w-full px-4 py-2 border rounded-xl text-sm bg-blue-50" />
+                      </div>
+                      <div></div>
+                      
+                      <div>
+                        <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Empenho Inicial</label>
+                        <input type="number" step="0.01" value={formData.valor_empenho_inicial || ''} onChange={(e) => setFormData({...formData, valor_empenho_inicial: parseFloat(e.target.value) || 0})} className="w-full px-4 py-2 border rounded-xl text-sm" />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Empenho Ajustes</label>
+                        <input type="number" step="0.01" value={formData.valor_empenho_ajustes || ''} onChange={(e) => setFormData({...formData, valor_empenho_ajustes: parseFloat(e.target.value) || 0})} className="w-full px-4 py-2 border rounded-xl text-sm" />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Empenhado (Total)</label>
+                        <input type="number" step="0.01" value={formData.valor_empenhado || ''} onChange={(e) => setFormData({...formData, valor_empenhado: parseFloat(e.target.value) || 0})} className="w-full px-4 py-2 border rounded-xl text-sm bg-blue-50" />
+                      </div>
+                      <div></div>
+                      
+                      <div>
+                        <label className="block text-[10px] font-black text-emerald-600 uppercase tracking-widest mb-1.5">Consumido</label>
+                        <input type="number" step="0.01" value={formData.valor_empenho_consumido || ''} onChange={(e) => setFormData({...formData, valor_empenho_consumido: parseFloat(e.target.value) || 0})} className="w-full px-4 py-2 border rounded-xl text-sm border-emerald-200 focus:ring-emerald-500 bg-white" />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-black text-amber-600 uppercase tracking-widest mb-1.5">Saldo Restante</label>
+                        <input type="number" step="0.01" value={formData.valor_empenho_saldo || ''} onChange={(e) => setFormData({...formData, valor_empenho_saldo: parseFloat(e.target.value) || 0})} className="w-full px-4 py-2 border rounded-xl text-sm border-amber-200 focus:ring-amber-500 bg-white" />
+                      </div>
+                    </div>
+                  ) : (
+                    <div>
+                      <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Valor (R$)</label>
+                      <input 
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        placeholder="0.00"
+                        value={formData.valor || ''} 
+                        onChange={(e) => setFormData({...formData, valor: parseFloat(e.target.value) || 0})}
+                        required
+                        className="w-full px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm font-bold text-slate-800 focus:ring-2 focus:ring-[#1d4ed8] focus:border-[#1d4ed8] outline-none transition-all"
+                      />
+                    </div>
+                  )}
                 </form>
               </div>
 
@@ -526,6 +764,142 @@ export default function FinanceiroPage() {
                 >
                   {isSaving && <Loader2 className="w-4 h-4 animate-spin" />}
                   {isSaving ? 'Salvando...' : 'Salvar'}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {/* Modal: Exporting Configuration */}
+        {showExportModal && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-white rounded-3xl w-full max-w-sm shadow-2xl overflow-hidden flex flex-col"
+            >
+              <div className="p-6 border-b border-slate-100 flex justify-between items-center">
+                <h3 className="text-lg font-black text-slate-800 tracking-tight uppercase italic">
+                  Configurar Exportação
+                </h3>
+                <button onClick={() => setShowExportModal(false)} className="text-slate-400 hover:text-slate-600">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="p-6 space-y-4">
+                <div>
+                  <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Nome do Arquivo (sem .xlsx)</label>
+                  <input 
+                    type="text" 
+                    value={exportFileName}
+                    onChange={(e) => setExportFileName(e.target.value)}
+                    className="w-full px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm font-bold focus:ring-2 focus:ring-blue-500 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Nome da Aba (Sheet)</label>
+                  <input 
+                    type="text" 
+                    value={exportSheetName}
+                    onChange={(e) => setExportSheetName(e.target.value)}
+                    className="w-full px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm font-bold focus:ring-2 focus:ring-blue-500 outline-none"
+                  />
+                  <p className="text-[9px] text-slate-400 font-bold mt-2 uppercase">Geralmente, sistemas do governo exigem que a aba tenha um nome específico para o Upload.</p>
+                </div>
+              </div>
+              <div className="p-6 border-t border-slate-100 flex gap-3">
+                <button 
+                  onClick={() => setShowExportModal(false)}
+                  className="w-full py-3 rounded-xl font-bold text-xs text-slate-500 bg-slate-100 hover:bg-slate-200 uppercase"
+                >
+                  Cancelar
+                </button>
+                <button 
+                  onClick={handleExportExcel}
+                  className="w-full py-3 rounded-xl font-bold text-xs text-white bg-blue-600 hover:bg-blue-700 uppercase flex items-center justify-center gap-2 shadow-lg shadow-blue-200"
+                >
+                  <Download className="w-4 h-4" />
+                  Baixar Excel
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+
+        {/* Modal: Importing Configuration */}
+        {showImportModal && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-white rounded-3xl w-full max-w-sm shadow-2xl overflow-hidden flex flex-col"
+            >
+              <div className="p-6 border-b border-slate-100 flex justify-between items-center">
+                <h3 className="text-lg font-black text-slate-800 tracking-tight uppercase italic">
+                  Opções de Importação
+                </h3>
+                <button onClick={() => setShowImportModal(false)} className="text-slate-400 hover:text-slate-600">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="p-6 space-y-4">
+                {isSaving && (
+                  <div className="space-y-2">
+                    <div className="flex justify-between text-[10px] font-black text-slate-500 uppercase">
+                      <span>Importando...</span>
+                      <span>{importProgress}%</span>
+                    </div>
+                    <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
+                      <motion.div 
+                        className="h-full bg-emerald-500"
+                        initial={{ width: 0 }}
+                        animate={{ width: `${importProgress}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+                <div>
+                  <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5">Escolha a Aba do Excel</label>
+                  <select 
+                    value={selectedImportSheet}
+                    onChange={(e) => setSelectedImportSheet(e.target.value)}
+                    className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl text-sm font-bold focus:ring-2 focus:ring-emerald-500 outline-none"
+                  >
+                    {importSheets.map(sheet => (
+                      <option key={sheet} value={sheet}>{sheet}</option>
+                    ))}
+                  </select>
+                  <p className="text-[10px] text-emerald-600 font-bold mt-3 uppercase tracking-tight text-center bg-emerald-50 py-2 rounded-lg">
+                    {importSheets.length} Abas localizadas neste arquivo.
+                  </p>
+                </div>
+              </div>
+              <div className="p-6 border-t border-slate-100 flex gap-3">
+                <button 
+                  onClick={() => setShowImportModal(false)}
+                  className="w-full py-3 rounded-xl font-bold text-xs text-slate-500 bg-slate-100 hover:bg-slate-200 uppercase"
+                >
+                  Cancelar
+                </button>
+                <button 
+                  onClick={handleConfirmImport}
+                  disabled={isSaving}
+                  className="w-full py-3 rounded-xl font-bold text-xs text-white bg-emerald-600 hover:bg-emerald-700 uppercase flex items-center justify-center gap-2 shadow-lg shadow-emerald-200 disabled:opacity-50"
+                >
+                  {isSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                  Importar Tabela
                 </button>
               </div>
             </motion.div>

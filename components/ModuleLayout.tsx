@@ -112,8 +112,7 @@ export default function ModuleLayout({ children, title, subtitle }: ModuleLayout
               <p className="text-[9px] font-bold text-blue-400 uppercase tracking-widest">Acesso Seguro</p>
             </div>
             <button 
-              onClick={async () => {
-                await supabase.auth.signOut();
+              onClick={() => {
                 router.push('/');
               }}
               className="w-10 h-10 flex items-center justify-center bg-rose-500/10 hover:bg-rose-500 text-rose-500 hover:text-white rounded-xl transition-all border border-rose-500/20"

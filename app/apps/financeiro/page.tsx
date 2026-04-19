@@ -53,6 +53,7 @@ export default function FinanceiroPage() {
   
   const [searchTerm, setSearchTerm] = useState('');
   const [filterTipo, setFilterTipo] = useState<'Todos' | 'Empenho' | 'Medição'>('Todos');
+  const [currentPage, setCurrentPage] = useState(1);
   
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -102,6 +103,7 @@ export default function FinanceiroPage() {
     }
   };
 
+  const ITEMS_PER_PAGE = 100;
   const filteredData = registros.filter(item => {
     const contrato = item.contrato || '';
     const fornecedor = item.fornecedor || '';
@@ -114,6 +116,9 @@ export default function FinanceiroPage() {
     const matchesTipo = filterTipo === 'Todos' || item.tipo === filterTipo;
     return matchesSearch && matchesTipo;
   });
+
+  const totalPages = Math.ceil(filteredData.length / ITEMS_PER_PAGE);
+  const paginatedData = filteredData.slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE);
 
   const totalEmpenhado = registros.filter(i => i.tipo === 'Empenho').reduce((acc, curr) => acc + (Number(curr.valor_empenhado || curr.valor) || 0), 0);
   const totalMedido = registros.filter(i => i.tipo === 'Medição').reduce((acc, curr) => acc + (Number(curr.valor) || 0), 0);
@@ -149,12 +154,17 @@ export default function FinanceiroPage() {
     }
     
     setIsSaving(true);
-    const novoRegistro = {
-      ...formData,
-      valor: formData.valor || 0
-    } as RegistroFinanceiro;
-
+    
     try {
+      const { data: userData } = await supabase.auth.getUser();
+      const currentUserId = userData?.user?.id;
+
+      const novoRegistro = {
+        ...formData,
+        valor: formData.valor || 0,
+        user_id: currentUserId,
+      } as RegistroFinanceiro;
+
       if (editingRecord) {
         const { error } = await supabase
           .from('financeiro_registros')
@@ -174,7 +184,7 @@ export default function FinanceiroPage() {
       handleCloseModal();
     } catch (err: any) {
       console.error('Erro ao salvar:', err);
-      alert('Erro ao salvar registro: ' + err.message);
+      alert('Erro ao salvar registro: ' + (err?.message || 'Verifique as permissões.'));
     } finally {
       setIsSaving(false);
     }
@@ -264,15 +274,22 @@ export default function FinanceiroPage() {
   };
 
   const [importProgress, setImportProgress] = useState(0);
+  const [importCount, setImportCount] = useState(0);
+  const [importTotal, setImportTotal] = useState(0);
 
   const handleConfirmImport = async () => {
     if (!importWorkbook || !selectedImportSheet) return;
     setIsSaving(true);
     setImportProgress(0);
+    setImportCount(0);
     try {
+      const { data: userData } = await supabase.auth.getUser();
+      const currentUserId = userData?.user?.id;
+
       const ws = importWorkbook.Sheets[selectedImportSheet];
       const data: any[] = XLSX.utils.sheet_to_json(ws);
-      const CHUNK_SIZE = 400;
+      setImportTotal(data.length);
+      const CHUNK_SIZE = 500;
       let totalInserted: RegistroFinanceiro[] = [];
 
       for (let i = 0; i < data.length; i += CHUNK_SIZE) {
@@ -287,11 +304,15 @@ export default function FinanceiroPage() {
           return isNaN(parsed) ? 0 : parsed;
         };
 
-        const newRecords: Partial<RegistroFinanceiro>[] = chunk.map((row: any) => {
+        const newRecords: Partial<RegistroFinanceiro>[] = chunk.map((row: any, index: number) => {
           if (!row) return {};
           try {
+            // Gera um ID sempre único, a menos que a planilha já tenha uma coluna explícita de "ID do Registro"
+            const uniqueId = row['ID do Registro'] || row['ID'] || row['id'] || `REG-${Date.now()}-${Math.random().toString(36).substr(2, 9)}-${index}`;
+            
             const record = {
-              id: String(row['Contrato'] || `REG-${Date.now()}-${Math.floor(Math.random() * 1000)}`),
+              id: String(uniqueId),
+              user_id: currentUserId,
               contrato: String(row['Contrato'] || 'Desconhecido'),
               tipo: 'Empenho',
               data: new Date().toISOString().split('T')[0],
@@ -309,14 +330,10 @@ export default function FinanceiroPage() {
               valor_empenho_saldo: parseBrNumber(row['Valor Empenho Saldo']),
             };
             return record;
-          } catch (e) {
-            console.error("Erro mapeando linha:", row, e);
+          } catch (e: any) {
             return {};
           }
         }).filter(r => Object.keys(r).length > 0);
-
-        console.log("Tentando inserir chunk de tamanho:", newRecords.length);
-        console.log("Primeiro registro do chunk:", newRecords[0]);
 
         const { data: inserted, error } = await supabase
           .from('financeiro_registros')
@@ -325,15 +342,27 @@ export default function FinanceiroPage() {
 
         if (error) throw error;
         totalInserted = [...totalInserted, ...(inserted || [])];
+        setImportCount(totalInserted.length);
         setImportProgress(Math.min(100, Math.floor(((i + chunk.length) / data.length) * 100)));
+        
+        // Se ainda tem mais itens para inserir, aguarde 2 segundos (2000 ms) para evitar Rate Limit
+        if (i + CHUNK_SIZE < data.length) {
+           await new Promise(resolve => setTimeout(resolve, 2000));
+        }
       }
       
       setRegistros(prev => [...totalInserted, ...prev]);
       alert(`${totalInserted.length} registros importados com sucesso!`);
     } catch (err: any) {
-      console.error("Erro detalhado:", err);
-      const errorMessage = err?.message || err?.error?.message || JSON.stringify(err) || 'Erro desconhecido na importação';
-      alert('Erro ao importar: ' + errorMessage);
+      let safeErrorMsg = 'Erro desconhecido';
+      try {
+        if (typeof err === 'string') safeErrorMsg = err;
+        else if (err?.message && typeof err.message === 'string') safeErrorMsg = err.message;
+        else if (err?.error?.message && typeof err.error.message === 'string') safeErrorMsg = err.error.message;
+      } catch(e) {}
+      
+      console.error("Falha ao subir arquivos pro DB:", err);
+      alert(`A importação foi interrompida com ERRO! Detalhes do sistema: ${safeErrorMsg}`);
     } finally {
       setIsSaving(false);
       setShowImportModal(false);
@@ -389,9 +418,14 @@ export default function FinanceiroPage() {
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="bg-white p-6 rounded-3xl border border-slate-100 shadow-xl shadow-slate-200/40 relative overflow-hidden">
             <div className="absolute -right-6 -top-6 w-32 h-32 bg-blue-50 rounded-full opacity-50 pointer-events-none" />
             <div className="flex justify-between items-start mb-4">
-              <div>
-                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Total Empenhado</p>
-                <h3 className="text-3xl font-black text-slate-800 tracking-tighter">{formatMoney(totalEmpenhado)}</h3>
+              <div className="min-w-0 pr-3">
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 truncate">Total Empenhado</p>
+                <h3 
+                  className="text-2xl lg:text-xl xl:text-2xl 2xl:text-3xl font-black text-slate-800 tracking-tighter truncate" 
+                  title={formatMoney(totalEmpenhado)}
+                >
+                  {formatMoney(totalEmpenhado)}
+                </h3>
               </div>
               <div className="w-12 h-12 rounded-2xl bg-blue-100 text-blue-600 flex items-center justify-center shrink-0">
                 <FileText className="w-6 h-6" />
@@ -406,9 +440,14 @@ export default function FinanceiroPage() {
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }} className="bg-white p-6 rounded-3xl border border-slate-100 shadow-xl shadow-slate-200/40 relative overflow-hidden">
             <div className="absolute -right-6 -top-6 w-32 h-32 bg-emerald-50 rounded-full opacity-50 pointer-events-none" />
             <div className="flex justify-between items-start mb-4">
-              <div>
-                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Total Medido</p>
-                <h3 className="text-3xl font-black text-slate-800 tracking-tighter">{formatMoney(totalMedido)}</h3>
+              <div className="min-w-0 pr-3">
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 truncate">Total Medido</p>
+                <h3 
+                  className="text-2xl lg:text-xl xl:text-2xl 2xl:text-3xl font-black text-slate-800 tracking-tighter truncate" 
+                  title={formatMoney(totalMedido)}
+                >
+                  {formatMoney(totalMedido)}
+                </h3>
               </div>
               <div className="w-12 h-12 rounded-2xl bg-emerald-100 text-emerald-600 flex items-center justify-center shrink-0">
                 <CheckCircle className="w-6 h-6" />
@@ -422,9 +461,14 @@ export default function FinanceiroPage() {
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }} className="bg-white p-6 rounded-3xl border border-slate-100 shadow-xl shadow-slate-200/40 relative overflow-hidden">
             <div className="absolute -right-6 -top-6 w-32 h-32 bg-amber-50 rounded-full opacity-50 pointer-events-none" />
             <div className="flex justify-between items-start mb-4">
-              <div>
-                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Saldo a Medir</p>
-                <h3 className="text-3xl font-black text-slate-800 tracking-tighter">{formatMoney(saldoPagar)}</h3>
+              <div className="min-w-0 pr-3">
+                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 truncate">Saldo a Medir</p>
+                <h3 
+                  className="text-2xl lg:text-xl xl:text-2xl 2xl:text-3xl font-black text-slate-800 tracking-tighter truncate" 
+                  title={formatMoney(saldoPagar)}
+                >
+                  {formatMoney(saldoPagar)}
+                </h3>
               </div>
               <div className="w-12 h-12 rounded-2xl bg-amber-100 text-amber-600 flex items-center justify-center shrink-0">
                 <DollarSign className="w-6 h-6" />
@@ -445,7 +489,7 @@ export default function FinanceiroPage() {
                 type="text" 
                 placeholder="Buscar contrato, ID ou fornecedor..."
                 value={searchTerm}
-                onChange={e => setSearchTerm(e.target.value)}
+                onChange={e => { setSearchTerm(e.target.value); setCurrentPage(1); }}
                 className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:ring-2 focus:ring-blue-500 outline-none transition-all placeholder:text-slate-400"
               />
             </div>
@@ -458,7 +502,7 @@ export default function FinanceiroPage() {
                 {(['Todos', 'Empenho', 'Medição'] as const).map(op => (
                   <button 
                     key={op}
-                    onClick={() => setFilterTipo(op)}
+                    onClick={() => { setFilterTipo(op); setCurrentPage(1); }}
                     className={`w-full text-left px-4 py-3 text-sm font-bold transition-colors ${filterTipo === op ? 'bg-blue-50 text-blue-600 border-l-2 border-blue-600' : 'text-slate-600 hover:bg-slate-50 border-l-2 border-transparent'}`}
                   >
                     {op}
@@ -468,6 +512,11 @@ export default function FinanceiroPage() {
             </div>
           </div>
           <div className="flex items-center gap-2 w-full md:w-auto overflow-x-auto">
+            <div className="hidden md:flex flex-col items-end mr-2 px-3 py-1 bg-slate-50 rounded-lg border border-slate-100">
+              <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest leading-none mb-0.5">Total Banco</span>
+              <span className="text-sm font-black text-[#1d4ed8] leading-none">{registros.length}</span>
+            </div>
+            
             <input 
               type="file" 
               accept=".xlsx, .xls, .csv" 
@@ -514,13 +563,13 @@ export default function FinanceiroPage() {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 <AnimatePresence>
-                  {filteredData.map((item, idx) => (
+                  {paginatedData.map((item, idx) => (
                     <motion.tr 
                       key={item.id}
                       initial={{ opacity: 0, y: 10 }}
                       animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0, scale: 0.95 }}
-                      transition={{ delay: idx * 0.05 }}
+                      transition={{ delay: (idx % 10) * 0.05 }}
                       onClick={() => handleOpenModal(item)}
                       className="hover:bg-slate-50/50 transition-colors group cursor-pointer"
                     >
@@ -564,7 +613,7 @@ export default function FinanceiroPage() {
                     </motion.tr>
                   ))}
 
-                  {filteredData.length === 0 && (
+                  {paginatedData.length === 0 && (
                     <tr>
                       <td colSpan={7} className="px-6 py-16 text-center">
                         <div className="inline-flex justify-center items-center w-16 h-16 rounded-full bg-slate-50 mb-4 border border-slate-100 shadow-inner">
@@ -579,6 +628,30 @@ export default function FinanceiroPage() {
               </tbody>
             </table>
           </div>
+          {/* Pagination Controls */}
+          {totalPages > 1 && (
+            <div className="px-6 py-4 flex items-center justify-between border-t border-slate-100 bg-slate-50">
+              <span className="text-xs font-bold text-slate-500">
+                Página {currentPage} de {totalPages}
+              </span>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                  disabled={currentPage === 1}
+                  className="px-4 py-2 border border-slate-200 rounded-xl bg-white text-xs font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed uppercase transition-colors"
+                >
+                  Anterior
+                </button>
+                <button
+                  onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                  disabled={currentPage === totalPages}
+                  className="px-4 py-2 border border-slate-200 rounded-xl bg-white text-xs font-bold text-slate-600 hover:bg-slate-100 disabled:opacity-50 disabled:cursor-not-allowed uppercase transition-colors"
+                >
+                  Próxima
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -857,9 +930,9 @@ export default function FinanceiroPage() {
               <div className="p-6 space-y-4">
                 {isSaving && (
                   <div className="space-y-2">
-                    <div className="flex justify-between text-[10px] font-black text-slate-500 uppercase">
-                      <span>Importando...</span>
-                      <span>{importProgress}%</span>
+                    <div className="flex justify-between items-end">
+                      <span className="text-[10px] font-black text-slate-500 uppercase">Importando...</span>
+                      <span className="text-sm font-bold text-emerald-600">{importCount} / {importTotal}</span>
                     </div>
                     <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
                       <motion.div 

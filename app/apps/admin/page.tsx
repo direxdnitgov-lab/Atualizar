@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import ModuleLayout from '@/components/ModuleLayout';
 import { supabase } from '@/lib/supabase';
+import { createClient } from '@supabase/supabase-js';
 import { 
   Users, 
   UserPlus, 
@@ -18,6 +19,13 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+
+// Cliente Secundário exclusivamente para criar contas sem deslogar o Admin atual.
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+const tempSupabase = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: { persistSession: false, autoRefreshToken: false }
+});
 
 interface UserProfile {
   id: string;
@@ -45,7 +53,7 @@ export default function AdminPage() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [editingUser, setEditingUser] = useState<UserProfile | null>(null);
-  const [newUser, setNewUser] = useState({ email: '', full_name: '', role: 'USER', allowed_apps: [] as string[] });
+  const [newUser, setNewUser] = useState({ email: '', password: '', full_name: '', role: 'USER', allowed_apps: [] as string[] });
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error', message: string } | null>(null);
 
   useEffect(() => {
@@ -99,18 +107,69 @@ export default function AdminPage() {
 
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    // Mostramos a instrução correta para criação segura de conta
-    setFeedback({ 
-      type: 'success', 
-      message: 'Por questões de segurança estrutural de Chave Estrangeira, novos usuários devem ser adicionados na aba "Authentication -> Add user" do painel Supabase. Após criar o e-mail/senha lá, o perfil aparecerá nesta tabela automaticamente para você editar as permissões.' 
-    });
-    
-    // Fechamos o modal após instruir
-    setTimeout(() => {
-      setShowAddModal(false);
-      setNewUser({ email: '', full_name: '', role: 'USER', allowed_apps: [] });
-    }, 8000);
+    setFeedback(null);
+    setLoading(true);
+
+    try {
+      // 1. Tenta criar o Auth Account
+      const { data, error } = await tempSupabase.auth.signUp({
+        email: newUser.email,
+        password: newUser.password, // Added password to state below
+      });
+
+      if (error) {
+         setFeedback({ type: 'error', message: 'Erro Supabase Auth: ' + error.message });
+         setLoading(false);
+         return;
+      }
+
+      // 2. Tabela de Profiles atualizada logo após a criação
+      if (data.user) {
+        // Aguarda um pequeno momento para que as Triggers do Supabase criem o `profile` vazio (caso exista trigger)
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        // Agora nós atualizamos os metadados do profile que foi criado ou criamos se não houver trigger
+        const { error: profileError } = await tempSupabase
+          .from('profiles')
+          .upsert({
+             id: data.user.id,
+             email: newUser.email,
+             full_name: newUser.full_name,
+             role: newUser.role,
+             allowed_apps: newUser.allowed_apps,
+          });
+
+        if (profileError) {
+           let safeMsg = 'Erro desconhecido';
+           try {
+             if (typeof profileError === 'string') safeMsg = profileError;
+             else if (profileError.message) safeMsg = profileError.message;
+           } catch(e) {}
+           
+           console.warn("Aviso no upsert de profile:", safeMsg);
+           if (safeMsg.includes('row-level security policy')) {
+              setFeedback({ type: 'error', message: `Conta criada, mas o Supabase impediu a gravação do perfil por causa do RLS. Vá ao painel do Supabase -> SQL Editor e execute a query para abrir o RLS para a tabela profiles.` });
+           } else {
+              setFeedback({ type: 'error', message: `Conta criada, mas erro ao salvar perfil: ${safeMsg}. Acesse o DB para corrigir.` });
+           }
+        } else {
+           setFeedback({ type: 'success', message: 'Usuário cadastrado com sucesso direto no banco!' });
+        }
+      }
+
+      setTimeout(() => {
+        setShowAddModal(false);
+        setNewUser({ email: '', password: '', full_name: '', role: 'USER', allowed_apps: [] });
+        fetchUsers();
+      }, 3000);
+    } catch (err: any) {
+      let safeMsg = 'Erro interno';
+      try { safeMsg = err.message || String(err); } catch(e) {}
+      console.warn("Erro no handleCreateUser:", safeMsg);
+      setFeedback({ type: 'error', message: 'Erro ao criar: ' + safeMsg });
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleUpdateUser = async (e: React.FormEvent) => {
@@ -136,16 +195,18 @@ export default function AdminPage() {
       setEditingUser(null);
       fetchUsers();
     } catch (err: any) {
-      console.error(err);
+      let safeMsg = 'Erro desconhecido';
+      try { safeMsg = err.message || String(err); } catch(e) {}
+      console.warn("Erro no update:", safeMsg);
       
       // If column does not exist because user hasn't run the script
-      if (err.message && err.message.includes('column "allowed_apps"')) {
+      if (safeMsg.includes('column "allowed_apps"')) {
          setFeedback({ 
             type: 'error', 
-            message: 'Erro crítico: A coluna "allowed_apps" não existe no Supabase. Por favor, execute o código SQL pendente no Editor.' 
+            message: 'Erro: A coluna "allowed_apps" não existe no Supabase. O banco precisa ser atualizado.' 
          });
       } else {
-         setFeedback({ type: 'error', message: 'Erro ao atualizar permissões do usuário.' });
+         setFeedback({ type: 'error', message: 'Erro ao atualizar: ' + safeMsg });
       }
     }
   };
@@ -367,43 +428,93 @@ export default function AdminPage() {
                 </button>
               </div>
 
-              <div className="p-10 text-center space-y-6">
+              <div className="p-10 space-y-6">
                 
                 {feedback && (
-                  <div className={`p-4 rounded-2xl text-xs font-bold leading-relaxed mb-6 ${
+                  <div className={`p-4 rounded-2xl text-xs font-bold leading-relaxed mb-6 flex items-center gap-3 ${
                     feedback.type === 'error' ? 'bg-rose-50 text-rose-600' : 'bg-emerald-50 text-emerald-600'
                   }`}>
-                    {feedback.message}
+                    {feedback.type === 'error' ? <AlertCircle className="w-5 h-5 shrink-0" /> : <CheckCircle2 className="w-5 h-5 shrink-0" />}
+                    <p>{feedback.message}</p>
                   </div>
                 )}
 
-                <div className="w-20 h-20 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center mx-auto mb-6">
-                  <ShieldCheck className="w-10 h-10" />
-                </div>
-                
-                <h4 className="text-lg font-black text-slate-800 uppercase italic">Criação de Contas</h4>
-                
-                <p className="text-slate-500 font-medium text-sm leading-relaxed">
-                  Por razões de segurança, toda nova conta corporativa deve ser criada diretamente no painel de Autenticação do Supabase. 
-                  Ao criar uma conta lá (e-mail e senha), o perfil aparecerá nesta tabela automaticamente para você editar as permissões.
-                </p>
+                <form onSubmit={handleCreateUser} className="space-y-6">
+                  <div>
+                    <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">E-mail Corporativo</label>
+                    <input 
+                      type="email" 
+                      required
+                      value={newUser.email}
+                      onChange={e => setNewUser({...newUser, email: e.target.value})}
+                      className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-800 focus:ring-2 focus:ring-blue-500 outline-none transition-all placeholder:text-slate-300"
+                      placeholder="exemplo@direx.gov.br"
+                    />
+                  </div>
 
-                <div className="pt-6 flex flex-col gap-3">
-                  <a 
-                    href={supabaseDashboardUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="w-full py-4 bg-blue-600 text-white rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-blue-700 transition-all flex items-center justify-center shadow-lg shadow-blue-200"
-                  >
-                    Ir para o Supabase Auth
-                  </a>
-                  <button 
-                    onClick={() => setShowAddModal(false)}
-                    className="w-full py-4 bg-slate-50 text-slate-500 rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-slate-100 transition-all"
-                  >
-                    Fechar
-                  </button>
-                </div>
+                  <div>
+                    <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Senha de Acesso</label>
+                    <input 
+                      type="password" 
+                      required
+                      minLength={6}
+                      value={newUser.password}
+                      onChange={e => setNewUser({...newUser, password: e.target.value})}
+                      className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-800 focus:ring-2 focus:ring-blue-500 outline-none transition-all placeholder:text-slate-300"
+                      placeholder="Mínimo 6 caracteres"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Nome Completo</label>
+                    <input 
+                      type="text" 
+                      required
+                      value={newUser.full_name}
+                      onChange={e => setNewUser({...newUser, full_name: e.target.value})}
+                      className="w-full px-5 py-4 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold text-slate-800 focus:ring-2 focus:ring-blue-500 outline-none transition-all placeholder:text-slate-300"
+                      placeholder="Nome do colaborador"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Nível Ministerial (Role)</label>
+                    <div className="grid grid-cols-2 gap-3">
+                      <button 
+                        type="button"
+                        onClick={() => setNewUser({...newUser, role: 'USER'})}
+                        className={`py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${
+                          newUser.role === 'USER' 
+                            ? 'bg-blue-600 text-white shadow-lg shadow-blue-200' 
+                            : 'bg-slate-50 text-slate-500 border border-slate-200 hover:bg-slate-100'
+                        }`}
+                      >
+                        Comum
+                      </button>
+                      <button 
+                        type="button"
+                        onClick={() => setNewUser({...newUser, role: 'ADMIN'})}
+                        className={`py-3 rounded-xl text-xs font-black uppercase tracking-widest transition-all ${
+                          newUser.role === 'ADMIN' 
+                            ? 'bg-amber-500 text-white shadow-lg shadow-amber-200' 
+                            : 'bg-slate-50 text-slate-500 border border-slate-200 hover:bg-slate-100'
+                        }`}
+                      >
+                        Admin
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="pt-6">
+                    <button 
+                      type="submit"
+                      disabled={loading}
+                      className="w-full py-4 bg-[#1d4ed8] text-white rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-blue-700 transition-all flex items-center justify-center shadow-lg shadow-blue-200 disabled:opacity-50"
+                    >
+                      {loading ? 'Processando no Banco...' : 'Finalizar Criação'}
+                    </button>
+                  </div>
+                </form>
               </div>
             </motion.div>
           </div>

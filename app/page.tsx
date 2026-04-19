@@ -141,6 +141,7 @@ export default function PortalPage() {
   const [appStatuses, setAppStatuses] = useState<Record<string, 'online' | 'offline' | 'checking'>>({});
   const [dbHealth, setDbHealth] = useState<'checking' | 'online' | 'offline'>('checking');
   const [loginError, setLoginError] = useState<string | null>(null);
+  const [isSignUp, setIsSignUp] = useState(false);
 
   const router = useRouter();
 
@@ -467,8 +468,7 @@ export default function PortalPage() {
               </button>
             </div>
 
-            <div className="mt-auto p-6">
-              {/* Help section removed as requested by user */}
+            <div className="mt-auto px-6 pt-4 text-center">
             </div>
           </div>
         </motion.div>
